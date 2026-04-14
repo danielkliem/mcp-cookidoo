@@ -28,35 +28,45 @@ INGREDIENTS = [
     "200 g Langkornreis",
     "400 g Wasser",
     "200 g stückige Tomaten",
+    "300 g Brokkoli, in Röschen",
 ]
 STEPS = [
     "1 Zwiebel, halbiert und 2 Knoblauchzehen in den Mixtopf geben.",
     "Zerkleinern 5 Sek./Stufe 5.",
     "Mit dem Spatel nach unten schieben und 20 g Olivenöl zugeben.",
     "Andünsten 3 Min./120°C/Linkslauf/Stufe 1.",
-    "200 g Langkornreis, 400 g Wasser und 200 g stückige Tomaten zugeben.",
+    "200 g Langkornreis, 400 g Wasser und 200 g stückige Tomaten zugeben. Varoma aufsetzen und 300 g Brokkoli, in Röschen hineinlegen.",
     "Kochen 18 Min./100°C/Linkslauf/Stufe 1.",
+    "Dämpfen 15 Min./Varoma/Stufe 2.",
 ]
 
-# (time, time-unit, speed, temperature or None) — order matches the 3 action steps
-EXPECTED_TTS = [
-    ("5", "s", "5", None),
-    ("180", "s", "1", "120"),
-    ("1080", "s", "1", "100"),
+# Expected action elements in document order:
+#   (tag, attribute_checks_dict)
+# tag is "cr-tts" for standard cook or "cr-mode" for mode annotations (e.g. STEAMING).
+EXPECTED_ACTIONS = [
+    ("cr-tts", {"time": "5", "time-unit": "s", "speed": "5", "-no-temp": True}),
+    ("cr-tts", {"time": "180", "time-unit": "s", "speed": "1", "temperature": "120", "temperature-unit": "C"}),
+    ("cr-tts", {"time": "1080", "time-unit": "s", "speed": "1", "temperature": "100", "temperature-unit": "C"}),
+    ("cr-mode", {"time": "900", "time-unit": "s", "speed": "2", "name": "steaming", "accessory": "Varoma"}),
 ]
 
-# Minimum number of ingredient annotations we expect to be rendered.
-EXPECTED_MIN_INGREDIENTS = 6
+EXPECTED_MIN_INGREDIENTS = 7
 
 
-def extract_cr_tts_attrs(html: str) -> list[dict]:
-    """Extract attributes from every <cr-tts ...> opening tag on the edit-steps page."""
-    tags = re.findall(r"<cr-tts\s([^>]*)>", html)
-    attrs_list = []
-    for raw in tags:
+def _extract_tag_attrs(html: str, tag: str) -> list[dict]:
+    tags = re.findall(rf"<{tag}\s([^>]*)>", html)
+    return [dict(re.findall(r'(\w[\w-]*)\s*=\s*"([^"]*)"', raw)) for raw in tags]
+
+
+def extract_action_tags(html: str) -> list[tuple[str, dict]]:
+    """Extract all cr-tts and cr-mode opening tags as (tag_name, attrs). Preserves document order."""
+    result = []
+    for m in re.finditer(r"<(cr-tts|cr-mode)\s([^>]*)>", html):
+        tag = m.group(1)
+        raw = m.group(2)
         attrs = dict(re.findall(r'(\w[\w-]*)\s*=\s*"([^"]*)"', raw))
-        attrs_list.append(attrs)
-    return attrs_list
+        result.append((tag, attrs))
+    return result
 
 
 def count_cr_ingredient(html: str) -> int:
@@ -87,6 +97,31 @@ def _assert(cond: bool, msg: str) -> None:
     print(f"  OK  {msg}")
 
 
+async def _assert_rollback(svc: CookidooService) -> None:
+    """Trigger a deliberate PATCH failure and verify the partial recipe was rolled back."""
+    before = {r["recipe_id"] for r in await svc.list_custom_recipes()}
+    try:
+        await svc.create_custom_recipe(
+            name=f"[ROLLBACK-TEST {int(time.time())}]",
+            ingredients=["1 g nothing"],
+            # Intentionally invalid TTS temperature value (enum rejects "99999"):
+            steps=["Kochen 1 Min./99999°C/Stufe 1."],
+            servings=1, prep_time=1, total_time=1, hints=None, tools=["TM7"],
+        )
+        raise AssertionError("rollback test: expected PATCH to fail, but it succeeded")
+    except Exception as e:
+        if "rollback test" in str(e):
+            raise
+        # Expected: PATCH 400, rollback deleted the empty recipe
+        after = {r["recipe_id"] for r in await svc.list_custom_recipes()}
+        new_recipes = after - before
+        if new_recipes:
+            raise AssertionError(
+                f"rollback failed — zombie recipe(s) remain: {new_recipes}"
+            )
+    print("  OK  failed upload rolled back cleanly (no zombie)")
+
+
 async def run() -> int:
     email, password = load_cookidoo_credentials()
     svc = CookidooService(email, password)
@@ -110,40 +145,29 @@ async def run() -> int:
         print("2. Fetching edit-steps HTML ...")
         html = await _fetch_edit_steps_html(svc, recipe_id)
 
-        print("3. Asserting rendered cr-tts tags ...")
-        tts_attrs = extract_cr_tts_attrs(html)
+        print("3. Asserting rendered action tags (cr-tts + cr-mode) ...")
+        actions = extract_action_tags(html)
         _assert(
-            len(tts_attrs) >= len(EXPECTED_TTS),
-            f"found {len(tts_attrs)} cr-tts tag(s), expected at least {len(EXPECTED_TTS)}",
+            len(actions) >= len(EXPECTED_ACTIONS),
+            f"found {len(actions)} action tag(s), expected at least {len(EXPECTED_ACTIONS)}",
         )
 
-        for i, (exp_time, exp_unit, exp_speed, exp_temp) in enumerate(EXPECTED_TTS):
-            attrs = tts_attrs[i]
+        for i, (exp_tag, exp_attrs) in enumerate(EXPECTED_ACTIONS):
+            actual_tag, attrs = actions[i]
             _assert(
-                attrs.get("time") == exp_time,
-                f"cr-tts[{i}] time={attrs.get('time')!r} (expected {exp_time!r})",
+                actual_tag == exp_tag,
+                f"action[{i}] tag={actual_tag!r} (expected {exp_tag!r})",
             )
-            _assert(
-                attrs.get("time-unit") == exp_unit,
-                f"cr-tts[{i}] time-unit={attrs.get('time-unit')!r} (expected {exp_unit!r})",
-            )
-            _assert(
-                attrs.get("speed") == exp_speed,
-                f"cr-tts[{i}] speed={attrs.get('speed')!r} (expected {exp_speed!r})",
-            )
-            if exp_temp is None:
+            for key, expected in exp_attrs.items():
+                if key == "-no-temp":
+                    _assert(
+                        "temperature" not in attrs,
+                        f"action[{i}] must NOT have temperature (got {attrs.get('temperature')!r})",
+                    )
+                    continue
                 _assert(
-                    "temperature" not in attrs,
-                    f"cr-tts[{i}] must NOT have temperature (got {attrs.get('temperature')!r})",
-                )
-            else:
-                _assert(
-                    attrs.get("temperature") == exp_temp,
-                    f"cr-tts[{i}] temperature={attrs.get('temperature')!r} (expected {exp_temp!r})",
-                )
-                _assert(
-                    attrs.get("temperature-unit") == "C",
-                    f"cr-tts[{i}] temperature-unit={attrs.get('temperature-unit')!r} (expected 'C')",
+                    attrs.get(key) == expected,
+                    f"action[{i}] {key}={attrs.get(key)!r} (expected {expected!r})",
                 )
 
         print("4. Asserting ingredient annotations ...")
@@ -152,6 +176,9 @@ async def run() -> int:
             n_ing >= EXPECTED_MIN_INGREDIENTS,
             f"found {n_ing} cr-ingredient tag(s), expected at least {EXPECTED_MIN_INGREDIENTS}",
         )
+
+        print("5. Asserting create_custom_recipe rollback on PATCH failure ...")
+        await _assert_rollback(svc)
 
         print("\nPASS — all assertions satisfied; recipe will render with Play-Buttons on TM7.")
         return 0

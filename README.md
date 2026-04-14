@@ -26,7 +26,9 @@ TM7-optimized custom recipes with automatic quality validation, built with `fast
 | `get_recipe_details(recipe_id)` | Fetch existing recipe by ID (e.g. `r59322`) |
 | `generate_recipe_structure(...)` | Parse + validate recipe data into JSON |
 | `validate_recipe_quality(recipe_json)` | Score recipe against TM7 criteria |
-| `upload_custom_recipe(recipe_json, force_upload=false)` | Upload to user's account (quality-gated) |
+| `upload_custom_recipe(recipe_json, force_upload=false)` | Upload to user's account (quality-gated, annotations + rollback on failure) |
+| `list_my_custom_recipes` | List custom recipes in the account |
+| `delete_custom_recipe(recipe_id)` | Delete a custom recipe (irreversible) |
 
 ## MCP Prompts
 

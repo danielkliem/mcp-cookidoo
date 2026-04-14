@@ -88,12 +88,12 @@ def _score_recipe(recipe: CustomRecipe) -> dict:
     issues: list[str] = []
     suggestions: list[str] = []
 
-    # Parse each step and count TTS hits (= tappable actions with play button)
+    # Parse each step and count action hits (TTS or MODE — both render with play button)
     tts_step_count = 0
     ingredient_hit_steps = 0
     for step in steps:
         anns = build_step_annotations(step, ingredients)
-        if any(a["type"] == "TTS" for a in anns):
+        if any(a["type"] in ("TTS", "MODE") for a in anns):
             tts_step_count += 1
         if any(a["type"] == "INGREDIENT" for a in anns):
             ingredient_hit_steps += 1
@@ -349,6 +349,53 @@ async def validate_recipe_quality(recipe_json: str) -> str:
 
 
 @mcp.tool()
+async def list_my_custom_recipes() -> str:
+    """
+    List all custom recipes in the user's Cookidoo account.
+
+    Use this to find recipes by name (e.g. before deleting or when looking up
+    a prior upload). Returns name, recipe_id, creation date, total_time, and
+    servings for each entry.
+    """
+    error, service = await _ensure_connected()
+    if error:
+        return error
+    try:
+        items = await service.list_custom_recipes()
+    except Exception as e:
+        return f"Failed to list recipes: {e}"
+    if not items:
+        return "No custom recipes in account."
+    lines = [f"{len(items)} custom recipe(s) in account:\n"]
+    for it in items:
+        lines.append(
+            f"  {it['recipe_id']}  {it['name']}  "
+            f"(created {it.get('created_at', '?')}, "
+            f"{it.get('servings', '?')} portions, {it.get('total_time', '?')})"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def delete_custom_recipe(recipe_id: str) -> str:
+    """
+    Permanently delete a custom recipe from the user's Cookidoo account.
+
+    Use this to clean up failed/zombie uploads or old test recipes. Only custom
+    (user-created) recipes can be deleted — official Cookidoo content cannot.
+    Irreversible; ask the user for confirmation before calling.
+    """
+    error, service = await _ensure_connected()
+    if error:
+        return error
+    try:
+        await service.delete_custom_recipe(recipe_id)
+        return f"Deleted custom recipe {recipe_id}."
+    except Exception as e:
+        return f"Failed to delete recipe: {e}"
+
+
+@mcp.tool()
 async def upload_custom_recipe(recipe_json: str, force_upload: bool = False) -> str:
     """
     Upload a recipe to the user's Cookidoo account.
@@ -446,6 +493,33 @@ Gültige Beispiele (werden jeweils als tappable guided step mit Play-Button gere
 - `Kochen 18 Min./100°C/Linkslauf/Stufe 1.`
 - `Dämpfen 15 Min./Varoma/Stufe 2.`
 - `Aufschlagen 1 Min./Stufe 4.`
+
+### Regel 4: Varoma ist KEINE Temperatur-Zahl
+
+Wenn der Varoma-Aufsatz benutzt wird (Dämpfen oben drauf), schreib immer wörtlich `Varoma` in den Temperatur-Slot — NIEMALS eine Zahl wie `100°C` oder `120°C`. Varoma ist ein eigener Dampf-Modus am TM7, nicht äquivalent zu 120°C (120°C erhitzt den Topfinhalt, Varoma generiert Dampf).
+
+- ✗ FALSCH: `Dämpfen 15 Min./120°C/Stufe 2.` (TM7 würde versuchen den Topfinhalt auf 120°C zu bringen)
+- ✓ RICHTIG: `Dämpfen 15 Min./Varoma/Stufe 2.` (TM7 aktiviert Dampf-Modus)
+
+Nur wenn du KEINEN Varoma-Aufsatz benutzt (also rein im Mixtopf kochst), gibst du die gewünschte Gar-Temperatur in °C an.
+
+### Varoma (Dämpfen) — wird automatisch als MODE/STEAMING annotiert
+
+Die Varoma-Regel ist jetzt einfach: schreib `X Min./Varoma/Stufe Y` wie jede andere Aktion, der Parser baut automatisch eine MODE/STEAMING-Annotation mit `accessory="Varoma"`. Der TM7 zeigt dann den Play-Button für Dämpfen-Modus.
+
+Beispiel: `Dämpfen 15 Min./Varoma/Stufe 2.`
+
+### Nicht unterstützte Spezial-Modi (als Prosa schreiben)
+
+Diese TM7-Modi brauchen andere Annotations-Typen die der Parser noch nicht erzeugt — **kein Play-Button** möglich. Schreib sie als **Prosa-Schritt** (ohne Zeit/Stufe-Format), der Nutzer stellt sie am TM7 manuell ein:
+
+- **Modus Anbraten** (Sear/Browning, `power: intensiv/medium/low`)
+- **Modus Gären / Fermentieren** (WARM_UP, 37–90°C)
+- **Modus Rice Cooker**
+- **Modus Turbo / Mixen kräftig**
+- **Teigknetstufe 🌾** (DOUGH mode, nur Time-Parameter)
+
+Beispiel für Anbraten als Prosa: `Das Fleisch mit dem Modus Anbraten auf Stufe „intensiv" für 7 Min. anbraten, nach der Hälfte der Zeit mit dem Spatel wenden.`
 
 ### Die drei harten Regeln
 
