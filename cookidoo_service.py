@@ -5,6 +5,7 @@ Module to encapsulate all cookidoo-api logic for interacting with the Cookidoo p
 """
 
 import os
+import re
 from typing import Optional
 from dotenv import load_dotenv
 from aiohttp import ClientSession
@@ -13,7 +14,112 @@ from cookidoo_api.helpers import (
     get_localization_options,
 )
 import aiohttp
-import time
+import asyncio
+
+
+# --- TTS parsing / annotation building ---
+
+_TTS_SPAN_RE = re.compile(
+    r"(\d+\s*(?:Sek\.?|sec|Min\.?|min)"                    # time (required)
+    r"(?:\s*/\s*(?:\d+\s*°\s*C|Varoma))?"                   # optional temp
+    r"(?:\s*/\s*(?:Linkslauf|sens inverse|reverse))?"       # optional direction
+    r"\s*/\s*Stufe\s*\d+(?:[.,]\d+)?)",                    # speed (required)
+    re.IGNORECASE,
+)
+_TIME_RE = re.compile(r"(\d+)\s*(Sek\.?|sec|Min\.?|min)", re.IGNORECASE)
+_SPEED_RE = re.compile(r"Stufe\s*(\d+(?:[.,]\d+)?)", re.IGNORECASE)
+_TEMP_RE = re.compile(r"(\d+)\s*°\s*C|([Vv]aroma)")
+
+
+def _parse_tts(action_text: str) -> Optional[dict]:
+    """Parse a TM action span like '5 Sek./Stufe 5' or '3 Min./120°C/Linkslauf/Stufe 1'."""
+    m_time = _TIME_RE.search(action_text)
+    if not m_time:
+        return None
+    n = int(m_time.group(1))
+    unit = m_time.group(2).lower()
+    if unit.startswith("sek") or unit.startswith("sec"):
+        seconds = n
+    elif unit.startswith("min"):
+        seconds = n * 60
+    else:
+        return None
+
+    m_speed = _SPEED_RE.search(action_text)
+    if not m_speed:
+        return None
+    speed = m_speed.group(1).replace(",", ".")
+
+    data: dict = {"speed": speed, "time": seconds}
+
+    m_temp = _TEMP_RE.search(action_text)
+    if m_temp:
+        if m_temp.group(2):
+            data["temperature"] = {"value": "Varoma", "unit": "C"}
+        else:
+            data["temperature"] = {"value": m_temp.group(1), "unit": "C"}
+
+    return data
+
+
+def build_step_annotations(text: str, ingredients: list[str]) -> list[dict]:
+    """
+    Build TTS + INGREDIENT annotations for a single step text.
+
+    Detects TM action patterns (time/temp/speed combos) and matches ingredient
+    references from the given ingredients list using exact-substring matching.
+    Overlapping matches are avoided; longest ingredients match first.
+    """
+    annotations: list[dict] = []
+    used: list[tuple[int, int]] = []
+
+    def overlaps(start: int, end: int) -> bool:
+        return any(not (end <= a or start >= b) for a, b in used)
+
+    for m in _TTS_SPAN_RE.finditer(text):
+        start, end = m.span(1)
+        tts = _parse_tts(m.group(1))
+        if tts is None or overlaps(start, end):
+            continue
+        annotations.append(
+            {
+                "type": "TTS",
+                "data": tts,
+                "position": {"offset": start, "length": end - start},
+            }
+        )
+        used.append((start, end))
+
+    for ing in sorted((i for i in ingredients if i), key=len, reverse=True):
+        search_from = 0
+        while True:
+            idx = text.find(ing, search_from)
+            if idx < 0:
+                break
+            end = idx + len(ing)
+            if overlaps(idx, end):
+                search_from = idx + 1
+                continue
+            annotations.append(
+                {
+                    "type": "INGREDIENT",
+                    "data": {"description": ing},
+                    "position": {"offset": idx, "length": len(ing)},
+                }
+            )
+            used.append((idx, end))
+            search_from = end
+
+    annotations.sort(key=lambda a: a["position"]["offset"])
+    return annotations
+
+
+def build_instruction(text: str, ingredients: list[str]) -> dict:
+    return {
+        "type": "STEP",
+        "text": text,
+        "annotations": build_step_annotations(text, ingredients),
+    }
 
 
 def load_cookidoo_credentials() -> tuple[str, str]:
@@ -76,7 +182,7 @@ class CookidooService:
                 email=self.email,
                 password=self.password,
                 localization=(
-                    await get_localization_options(country="fr", language="fr-FR")
+                    await get_localization_options(country="ch", language="de-CH")
                 )[0],
             )
             
@@ -108,6 +214,7 @@ class CookidooService:
         prep_time: int = 30,
         total_time: int = 60,
         hints: Optional[list[str]] = None,
+        tools: Optional[list[str]] = None,
     ) -> str:
         """
         Create a completely new custom recipe from scratch using the undocumented API.
@@ -180,13 +287,13 @@ class CookidooService:
                 "name": name,
                 "image": None,  # Can be null or match pattern: ^((prod|nonprod)/img/customer-recipe/)?[A-Za-z0-9-_]{1,}.(bmp|jpe|jpeg|jpg|png)$
                 "isImageOwnedByUser": False,
-                "tools": ["TM6"],
+                "tools": tools if tools else ["TM7", "TM6", "TM5"],
                 "yield": {"value": servings, "unitText": "portion"},
                 "prepTime": prep_time * 60,  # Convert minutes to seconds
                 "cookTime": 0,
                 "totalTime": total_time * 60,  # Convert minutes to seconds
                 "ingredients": [{"type": "INGREDIENT", "text": ing} for ing in ingredients],
-                "instructions": [{"type": "STEP", "text": step} for step in steps],
+                "instructions": [build_instruction(step, ingredients) for step in steps],
                 "hints": "\n".join(hints) if hints and isinstance(hints, list) else (hints if hints else ""),
                 "workStatus": "PRIVATE",
                 "recipeMetadata": {
@@ -194,15 +301,14 @@ class CookidooService:
                 }
             }
             
-            time.sleep(5)
+            await asyncio.sleep(5)
 
             async with api_session.patch(update_url, json=update_data, headers=headers) as response:
-                print(f"  Response Status: {response.status}")
                 response_text = await response.text()
-                print(f"  Response Body: {response_text}")
-                
                 if response.status not in [200, 204]:
-                    raise Exception(f"Failed to update recipe: {response_text}")
+                    raise Exception(
+                        f"Failed to update recipe. Status: {response.status}, Error: {response_text}"
+                    )
             
             return recipe_id
             

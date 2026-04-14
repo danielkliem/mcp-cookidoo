@@ -40,4 +40,4 @@ ENV/
 .DS_Store
 Thumbs.db
 
-.gemini/
+.gemini/.claude/

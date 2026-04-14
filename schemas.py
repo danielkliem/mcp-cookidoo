@@ -34,7 +34,8 @@ class CustomRecipe(BaseModel):
                 "hints": [
                     "Don't overmix the dough",
                     "Cookies will firm up as they cool"
-                ]
+                ],
+                "tools": ["TM7", "TM6", "TM5"]
             }
         }
     )
@@ -71,4 +72,8 @@ class CustomRecipe(BaseModel):
     hints: Optional[list[str]] = Field(
         default=None,
         description="Optional cooking tips or hints"
+    )
+    tools: list[str] = Field(
+        default_factory=lambda: ["TM7", "TM6", "TM5"],
+        description="Compatible Thermomix devices (e.g. TM5, TM6, TM7). Defaults to all three."
     )
