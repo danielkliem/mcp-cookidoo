@@ -26,9 +26,61 @@ _TTS_SPAN_RE = re.compile(
     r"\s*/\s*Stufe\s*\d+(?:[.,]\d+)?)",                    # speed (required)
     re.IGNORECASE,
 )
+# Browning (Modus Anbraten) — time + temperature + power. The distinctive
+# power word (Leicht/Intensiv/Gentle/Intense) lets us detect browning without
+# relying on an "Anbraten" verb prefix (which the normalizer may strip).
+_BROWNING_SPAN_RE = re.compile(
+    r"(\d+\s*Min\.?"                                       # time
+    r"\s*/\s*\d+\s*°\s*C"                                  # temperature
+    r"\s*/\s*(?:Leicht|Intensiv|Gentle|Intense))",         # power
+    re.IGNORECASE,
+)
 _TIME_RE = re.compile(r"(\d+)\s*(Sek\.?|sec|Min\.?|min)", re.IGNORECASE)
 _SPEED_RE = re.compile(r"Stufe\s*(\d+(?:[.,]\d+)?)", re.IGNORECASE)
 _TEMP_RE = re.compile(r"(\d+)\s*°\s*C|([Vv]aroma)")
+_POWER_RE = re.compile(r"(Leicht|Intensiv|Gentle|Intense)", re.IGNORECASE)
+# BROWNING temperature enum (Celsius): only these discrete values are accepted.
+_BROWNING_TEMPS = {"140", "145", "150", "155", "160"}
+
+# A step is "near-pure action" if it contains exactly one action span and the
+# surrounding text is just a single verb prefix + optional trailing punctuation.
+# On the TM7 device, such steps must be stored as pure action text (no prose)
+# or the guided step gets a "mark as done" checkbox instead of a play button.
+_PURE_TTS_STEP_RE = re.compile(
+    r"^\s*(?:[A-ZÄÖÜ][a-zäöüß]+\s+)?"
+    r"(\d+\s*(?:Sek\.?|sec|Min\.?|min)"
+    r"(?:\s*/\s*(?:\d+\s*°\s*C|Varoma))?"
+    r"(?:\s*/\s*(?:Linkslauf|sens inverse|reverse))?"
+    r"\s*/\s*Stufe\s*\d+(?:[.,]\d+)?)"
+    r"\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+_PURE_BROWNING_STEP_RE = re.compile(
+    r"^\s*(?:(?:Modus\s+)?Anbraten\s+)?"
+    r"(\d+\s*Min\.?\s*/\s*\d+\s*°\s*C\s*/\s*(?:Leicht|Intensiv|Gentle|Intense))"
+    r"\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_action_step(text: str) -> str:
+    """
+    Strip verb prefix and trailing punctuation from near-pure action steps.
+
+    ``"Mahlen 30 Sek./Stufe 10."`` → ``"30 Sek./Stufe 10"``
+    ``"Dämpfen 15 Min./Varoma/Stufe 2."`` → ``"15 Min./Varoma/Stufe 2"``
+    ``"Anbraten 7 Min./160°C/Intensiv."`` → ``"7 Min./160°C/Intensiv"``
+
+    Steps with meaningful surrounding prose (more than a single verb word) are
+    left untouched so their ingredients/context still show up.
+    """
+    m = _PURE_TTS_STEP_RE.match(text)
+    if m:
+        return m.group(1)
+    m = _PURE_BROWNING_STEP_RE.match(text)
+    if m:
+        return m.group(1)
+    return text
 
 
 def _parse_action(text: str) -> Optional[tuple[str, Optional[str], dict]]:
@@ -78,13 +130,52 @@ def _parse_action(text: str) -> Optional[tuple[str, Optional[str], dict]]:
     return ("TTS", None, data)
 
 
+def _parse_browning(span_text: str) -> Optional[dict]:
+    """Parse a browning action like '7 Min./160°C/Intensiv' into BROWNING mode data."""
+    m_time = _TIME_RE.search(span_text)
+    if not m_time:
+        return None
+    n = int(m_time.group(1))
+    unit = m_time.group(2).lower()
+    seconds = n * 60 if unit.startswith("min") else n
+    if not (1 <= seconds <= 1800):
+        return None
+
+    m_temp = _TEMP_RE.search(span_text)
+    if not m_temp or not m_temp.group(1):
+        return None
+    temp_str = m_temp.group(1)
+    if temp_str not in _BROWNING_TEMPS:
+        return None
+
+    m_power = _POWER_RE.search(span_text)
+    if not m_power:
+        return None
+    raw = m_power.group(1).lower()
+    power = "Intense" if raw in ("intensiv", "intense") else "Gentle"
+
+    return {
+        "time": seconds,
+        "temperature": {"value": temp_str, "unit": "C"},
+        "power": power,
+    }
+
+
 def build_step_annotations(text: str, ingredients: list[str]) -> list[dict]:
     """
-    Build TTS + INGREDIENT annotations for a single step text.
+    Build annotations for a single step text.
 
-    Detects TM action patterns (time/temp/speed combos) and matches ingredient
-    references from the given ingredients list using exact-substring matching.
-    Overlapping matches are avoided; longest ingredients match first.
+    Detects three action pattern families and matches ingredient references
+    from the given ingredients list using exact-substring matching. Overlapping
+    matches are avoided; longer matches win first.
+
+    Action patterns:
+    - Standard cook ``X Sek./Stufe Y`` / ``X Min./T°C/[Linkslauf/]Stufe Y``
+      → type=TTS (renders as ``<cr-tts>``)
+    - Varoma steam ``X Min./Varoma/Stufe Y``
+      → type=MODE, name=STEAMING (renders as ``<cr-mode name="steaming">``)
+    - Browning ``Anbraten X Min./T°C/Intensiv`` (T in {140,145,150,155,160})
+      → type=MODE, name=BROWNING (renders as ``<cr-mode name="browning">``)
     """
     annotations: list[dict] = []
     used: list[tuple[int, int]] = []
@@ -92,10 +183,27 @@ def build_step_annotations(text: str, ingredients: list[str]) -> list[dict]:
     def overlaps(start: int, end: int) -> bool:
         return any(not (end <= a or start >= b) for a, b in used)
 
+    for m in _BROWNING_SPAN_RE.finditer(text):
+        start, end = m.span(1)
+        data = _parse_browning(m.group(1))
+        if data is None or overlaps(start, end):
+            continue
+        annotations.append(
+            {
+                "type": "MODE",
+                "name": "BROWNING",
+                "data": data,
+                "position": {"offset": start, "length": end - start},
+            }
+        )
+        used.append((start, end))
+
     for m in _TTS_SPAN_RE.finditer(text):
         start, end = m.span(1)
+        if overlaps(start, end):
+            continue
         parsed = _parse_action(m.group(1))
-        if parsed is None or overlaps(start, end):
+        if parsed is None:
             continue
         atype, aname, data = parsed
         annotation: dict = {
@@ -311,7 +419,10 @@ class CookidooService:
                 "cookTime": 0,
                 "totalTime": total_time * 60,  # Convert minutes to seconds
                 "ingredients": [{"type": "INGREDIENT", "text": ing} for ing in ingredients],
-                "instructions": [build_instruction(step, ingredients) for step in steps],
+                "instructions": [
+                    build_instruction(normalize_action_step(step), ingredients)
+                    for step in steps
+                ],
                 "hints": "\n".join(hints) if hints and isinstance(hints, list) else (hints if hints else ""),
                 "workStatus": "PRIVATE",
                 "recipeMetadata": {

@@ -486,40 +486,50 @@ Der Cookidoo-Backend erkennt TM-Aktionen nur wenn sie in einem **eigenen Schritt
 ZEIT/[TEMP°C/][Linkslauf/]Stufe X
 ```
 
-Gültige Beispiele (werden jeweils als tappable guided step mit Play-Button gerendert):
-- `Zerkleinern 5 Sek./Stufe 5.`
-- `Mahlen 30 Sek./Stufe 10.`
-- `Andünsten 3 Min./120°C/Linkslauf/Stufe 1.`
-- `Kochen 18 Min./100°C/Linkslauf/Stufe 1.`
-- `Dämpfen 15 Min./Varoma/Stufe 2.`
-- `Aufschlagen 1 Min./Stufe 4.`
+### Unterstützte Action-Formate (mit Play-Button)
 
-### Regel 4: Varoma ist KEINE Temperatur-Zahl
+**1. Standard-Kochen / Mixen (TTS)**
+```
+X Sek./Stufe Y                              (reine Geschwindigkeit)
+X Min./T°C/Stufe Y                          (mit Temperatur)
+X Min./T°C/Linkslauf/Stufe Y                (mit Temperatur und Richtung)
+```
+Beispiele: `5 Sek./Stufe 5`, `3 Min./120°C/Linkslauf/Stufe 1`, `18 Min./100°C/Linkslauf/Stufe 1`
 
-Wenn der Varoma-Aufsatz benutzt wird (Dämpfen oben drauf), schreib immer wörtlich `Varoma` in den Temperatur-Slot — NIEMALS eine Zahl wie `100°C` oder `120°C`. Varoma ist ein eigener Dampf-Modus am TM7, nicht äquivalent zu 120°C (120°C erhitzt den Topfinhalt, Varoma generiert Dampf).
+Temperatur-Werte (°C) sind nur in diskreten Schritten erlaubt: `37, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 98, 100, 105, 110, 115, 120`. Andere Werte werden vom Backend abgelehnt → Upload schlägt fehl.
 
-- ✗ FALSCH: `Dämpfen 15 Min./120°C/Stufe 2.` (TM7 würde versuchen den Topfinhalt auf 120°C zu bringen)
-- ✓ RICHTIG: `Dämpfen 15 Min./Varoma/Stufe 2.` (TM7 aktiviert Dampf-Modus)
+**2. Varoma-Dämpfen (MODE/STEAMING)**
+```
+X Min./Varoma/Stufe Y
+```
+Beispiel: `15 Min./Varoma/Stufe 2`
 
-Nur wenn du KEINEN Varoma-Aufsatz benutzt (also rein im Mixtopf kochst), gibst du die gewünschte Gar-Temperatur in °C an.
+Varoma ist ein Dampf-Modus, **keine Temperatur-Zahl**. Wenn du mit dem Varoma-Aufsatz (oben drauf) dämpfst, schreib `Varoma` — NICHT `100°C` oder `120°C`. Die beiden Modi sind am Gerät unterschiedlich.
 
-### Varoma (Dämpfen) — wird automatisch als MODE/STEAMING annotiert
+**3. Anbraten / Browning (MODE/BROWNING)**
+```
+X Min./T°C/Leistung
+```
+Beispiele: `7 Min./160°C/Intensiv`, `10 Min./140°C/Leicht`
 
-Die Varoma-Regel ist jetzt einfach: schreib `X Min./Varoma/Stufe Y` wie jede andere Aktion, der Parser baut automatisch eine MODE/STEAMING-Annotation mit `accessory="Varoma"`. Der TM7 zeigt dann den Play-Button für Dämpfen-Modus.
+Nur diese 5 Temperaturen erlaubt: `140, 145, 150, 155, 160` °C. Max 30 Min Zeit. Leistung ist entweder `Leicht` oder `Intensiv`.
 
-Beispiel: `Dämpfen 15 Min./Varoma/Stufe 2.`
+### Normalisierung — lass den Verb-Prefix weg oder nicht, egal
 
-### Nicht unterstützte Spezial-Modi (als Prosa schreiben)
+Der Parser strippt automatisch einen Verb-Prefix wie `Mahlen`, `Zerkleinern`, `Dämpfen`, `Kochen`, `Anbraten` und trailende Satzzeichen. Das heißt: `"Mahlen 30 Sek./Stufe 10."` und `"30 Sek./Stufe 10"` werden beide identisch gespeichert. **Wichtig**: der Schritt darf **KEINE weitere Prosa** enthalten — keine Erklärung, kein Kontext, nur das Action-Pattern (+ optional einfacher Verb-Prefix). Prosa um eine Action herum führt am TM7 zur Checkbox-Anzeige statt Play-Button. Erklärungen gehören in den **vorherigen Schritt**.
 
-Diese TM7-Modi brauchen andere Annotations-Typen die der Parser noch nicht erzeugt — **kein Play-Button** möglich. Schreib sie als **Prosa-Schritt** (ohne Zeit/Stufe-Format), der Nutzer stellt sie am TM7 manuell ein:
+- ✓ RICHTIG: `"Mahlen 30 Sek./Stufe 10."` (verb + action)
+- ✓ RICHTIG: `"30 Sek./Stufe 10"` (pure action)
+- ✗ FALSCH: `"Nach der Hälfte wenden, dann 30 Sek./Stufe 10 weiterlaufen lassen."` (prose um action → Checkbox)
 
-- **Modus Anbraten** (Sear/Browning, `power: intensiv/medium/low`)
+### Nicht unterstützte Modi (als Prosa schreiben)
+
+Diese TM7-Modi sind noch nicht im Parser — kein Play-Button möglich. Schreib sie als normalen Prosa-Schritt, der User stellt am TM7 manuell ein:
+
 - **Modus Gären / Fermentieren** (WARM_UP, 37–90°C)
 - **Modus Rice Cooker**
 - **Modus Turbo / Mixen kräftig**
 - **Teigknetstufe 🌾** (DOUGH mode, nur Time-Parameter)
-
-Beispiel für Anbraten als Prosa: `Das Fleisch mit dem Modus Anbraten auf Stufe „intensiv" für 7 Min. anbraten, nach der Hälfte der Zeit mit dem Spatel wenden.`
 
 ### Die drei harten Regeln
 

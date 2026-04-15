@@ -22,6 +22,7 @@ from cookidoo_service import CookidooService, load_cookidoo_credentials
 TEST_NAME = f"[INT-TEST {int(time.time())}] TTS Annotation Roundtrip"
 
 INGREDIENTS = [
+    "400 g Rindfleisch, gewürfelt",
     "1 Zwiebel, halbiert",
     "2 Knoblauchzehen",
     "20 g Olivenöl",
@@ -30,27 +31,31 @@ INGREDIENTS = [
     "200 g stückige Tomaten",
     "300 g Brokkoli, in Röschen",
 ]
+# Deliberately include verb prefixes and trailing periods on every action step
+# to exercise the normalizer — the backend should receive pure-action text.
 STEPS = [
     "1 Zwiebel, halbiert und 2 Knoblauchzehen in den Mixtopf geben.",
     "Zerkleinern 5 Sek./Stufe 5.",
     "Mit dem Spatel nach unten schieben und 20 g Olivenöl zugeben.",
     "Andünsten 3 Min./120°C/Linkslauf/Stufe 1.",
+    "400 g Rindfleisch, gewürfelt in den Mixtopf geben.",
+    "Anbraten 7 Min./160°C/Intensiv.",
     "200 g Langkornreis, 400 g Wasser und 200 g stückige Tomaten zugeben. Varoma aufsetzen und 300 g Brokkoli, in Röschen hineinlegen.",
     "Kochen 18 Min./100°C/Linkslauf/Stufe 1.",
     "Dämpfen 15 Min./Varoma/Stufe 2.",
 ]
 
-# Expected action elements in document order:
-#   (tag, attribute_checks_dict)
-# tag is "cr-tts" for standard cook or "cr-mode" for mode annotations (e.g. STEAMING).
+# Expected action elements in document order: (tag, attribute_checks_dict).
+# tag is "cr-tts" (standard cook) or "cr-mode" (STEAMING / BROWNING).
 EXPECTED_ACTIONS = [
-    ("cr-tts", {"time": "5", "time-unit": "s", "speed": "5", "-no-temp": True}),
-    ("cr-tts", {"time": "180", "time-unit": "s", "speed": "1", "temperature": "120", "temperature-unit": "C"}),
-    ("cr-tts", {"time": "1080", "time-unit": "s", "speed": "1", "temperature": "100", "temperature-unit": "C"}),
-    ("cr-mode", {"time": "900", "time-unit": "s", "speed": "2", "name": "steaming", "accessory": "Varoma"}),
+    ("cr-tts",  {"time": "5",    "time-unit": "s", "speed": "5", "-no-temp": True}),
+    ("cr-tts",  {"time": "180",  "time-unit": "s", "speed": "1", "temperature": "120", "temperature-unit": "C"}),
+    ("cr-mode", {"time": "420",  "time-unit": "s", "name": "browning", "temperature": "160", "power": "Intense"}),
+    ("cr-tts",  {"time": "1080", "time-unit": "s", "speed": "1", "temperature": "100", "temperature-unit": "C"}),
+    ("cr-mode", {"time": "900",  "time-unit": "s", "speed": "2", "name": "steaming", "accessory": "Varoma"}),
 ]
 
-EXPECTED_MIN_INGREDIENTS = 7
+EXPECTED_MIN_INGREDIENTS = 8
 
 
 def _extract_tag_attrs(html: str, tag: str) -> list[dict]:
@@ -175,6 +180,32 @@ async def run() -> int:
         _assert(
             n_ing >= EXPECTED_MIN_INGREDIENTS,
             f"found {n_ing} cr-ingredient tag(s), expected at least {EXPECTED_MIN_INGREDIENTS}",
+        )
+
+        print("5. Asserting action steps render WITHOUT surrounding prose ...")
+        # A step that contains a cr-tts or cr-mode element must have that
+        # element as its SOLE content — any prose before/after triggers a
+        # "mark as done" checkbox on the TM7 device instead of a play button.
+        action_lis = re.findall(
+            r"<li[^>]*>(\s*<cr-(?:tts|mode)[^>]*>.*?</cr-(?:tts|mode)>\s*)</li>",
+            html,
+            re.DOTALL,
+        )
+        mixed_lis = re.findall(
+            r"<li[^>]*>([^<]*<cr-(?:tts|mode)[^>]*>.*?</cr-(?:tts|mode)>[^<]*)</li>",
+            html,
+            re.DOTALL,
+        )
+        # Count <li> that contain an action element AND prose
+        prose_around_action = 0
+        for inner in mixed_lis:
+            stripped = re.sub(r"<cr-(?:tts|mode).*?</cr-(?:tts|mode)>", "", inner, flags=re.DOTALL).strip()
+            if stripped:
+                prose_around_action += 1
+        _assert(
+            prose_around_action == 0,
+            f"{prose_around_action} action step(s) have prose/punctuation around the cr-tts/cr-mode tag "
+            "(normalizer failed); device will render them with a checkbox instead of a play button.",
         )
 
         print("5. Asserting create_custom_recipe rollback on PATCH failure ...")

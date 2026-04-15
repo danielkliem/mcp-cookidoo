@@ -10,9 +10,18 @@ TM7-optimized custom recipes with automatic quality validation, built with `fast
 
 - **Lazy auth** — tools auto-connect on first call; no manual `connect` step required
 - **Read recipes** — fetch full details for any Cookidoo recipe by ID
+- **Guided-cooking annotations** — action steps in three modes (standard TTS,
+  `MODE/STEAMING` for Varoma, `MODE/BROWNING` for Anbraten) are detected in the
+  step text, emitted as proper backend annotations, and render on the TM7
+  device with a Play-Button. Verb prefixes (`Mahlen`, `Zerkleinern`, `Anbraten`, …)
+  are automatically stripped so steps stay pure-action (otherwise the TM7
+  renders them with a "mark as done" checkbox instead).
 - **TM7 quality gate** — recipes are scored 0–100 on Thermomix vocabulary (time /
   temperature / speed / accessories / parallelization) and the upload tool refuses
   recipes below the configured bar unless `force_upload=true` is passed
+- **Upload rollback** — if the PATCH step fails (e.g. schema validation error)
+  the partial recipe is automatically deleted, so failed attempts never leave
+  zombie entries in the account
 - **Guided creation** — MCP prompt `create_tm7_recipe(dish)` drives Claude through
   an autonomous TM7-optimized recipe creation workflow
 - **Two transports** — HTTP (stateless, token-auth) for remote Claude.ai Connectors,
