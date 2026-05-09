@@ -28,6 +28,7 @@ VERSION = "0.2.0"
 API_TOKEN = os.environ.get("COOKIDOO_API_TOKEN", "")
 PORT = int(os.environ.get("COOKIDOO_MCP_PORT", "8001"))
 QUALITY_BAR = int(os.environ.get("COOKIDOO_QUALITY_BAR", "70"))
+TOKEN_REFRESH_BUFFER_SECONDS = 60
 
 mcp = FastMCP("cookidoo-mcp-server")
 
@@ -36,10 +37,30 @@ _cookidoo_api = None
 
 
 async def _ensure_connected() -> tuple[Optional[str], Optional[CookidooService]]:
-    """Lazy-login. Returns (error_message, service). If error_message is None, service is usable."""
+    """Lazy-login with proactive token refresh.
+
+    The server process is long-lived; Cookidoo access tokens are not. Without
+    refresh, every authenticated call after the first hour returns 401. This
+    function uses the OAuth refresh-grant via ``Cookidoo.refresh_token()`` so
+    the email+password login only runs once per process (or after the refresh
+    token itself dies).
+
+    Returns ``(error_message, service)``. ``error_message`` is None on success.
+    """
     global _cookidoo_service, _cookidoo_api
     if _cookidoo_service and _cookidoo_api:
-        return None, _cookidoo_service
+        if _cookidoo_api.expires_in > TOKEN_REFRESH_BUFFER_SECONDS:
+            return None, _cookidoo_service
+        try:
+            await _cookidoo_api.refresh_token()
+            return None, _cookidoo_service
+        except Exception:
+            try:
+                await _cookidoo_service.close()
+            except Exception:
+                pass
+            _cookidoo_service = None
+            _cookidoo_api = None
     try:
         email, password = load_cookidoo_credentials()
         _cookidoo_service = CookidooService(email, password)

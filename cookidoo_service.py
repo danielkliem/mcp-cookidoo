@@ -4,12 +4,14 @@ Cookidoo Service
 Module to encapsulate all cookidoo-api logic for interacting with the Cookidoo platform.
 """
 
+import json
 import os
 import re
 from typing import Optional
 from dotenv import load_dotenv
 from aiohttp import ClientSession
 from cookidoo_api import Cookidoo, CookidooConfig
+from cookidoo_api.exceptions import CookidooAuthException
 from cookidoo_api.helpers import (
     get_localization_options,
 )
@@ -330,7 +332,42 @@ class CookidooService:
         """Close the aiohttp session."""
         if self._session:
             await self._session.close()
-    
+
+    async def _authed_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: Optional[dict] = None,
+        accept: str = "application/json",
+    ) -> tuple[int, str]:
+        """Make an authenticated HTTP request, refreshing the token once on 401.
+
+        Returns ``(status, body_text)``. The custom-recipe endpoints are not
+        wrapped by the cookidoo-api library, so the library's auth-retry logic
+        doesn't apply — we have to do the refresh-on-401 here ourselves.
+        """
+        if not self._api_client:
+            raise Exception("Not authenticated. Please call login() first.")
+
+        async def _send() -> tuple[int, str]:
+            headers = {
+                "Accept": accept,
+                "Authorization": f"Bearer {self._api_client.auth_data.access_token}",
+            }
+            if json_body is not None:
+                headers["Content-Type"] = "application/json"
+            async with self._api_client._session.request(
+                method, url, json=json_body, headers=headers
+            ) as r:
+                return r.status, await r.text()
+
+        status, text = await _send()
+        if status == 401:
+            await self._api_client.refresh_token()
+            status, text = await _send()
+        return status, text
+
     async def create_custom_recipe(
         self,
         name: str,
@@ -362,62 +399,36 @@ class CookidooService:
         """
         if not self._api_client or not self._session:
             raise Exception("Not authenticated. Please call login() first.")
-        
+
         try:
-            # Get the access token from the authenticated client
-            auth_data = self._api_client.auth_data
-            if not auth_data:
-                raise Exception("No authentication data available")
-            
             localization = self._api_client.localization
-            # Extract base domain from the URL (e.g., "https://cookidoo.fr/foundation/fr-FR" -> "https://cookidoo.fr")
             url_parts = localization.url.split("/")
-            base_url = f"{url_parts[0]}//{url_parts[2]}"  # protocol + domain
-            locale = localization.language 
-            
-            # Headers for the undocumented API
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._api_client.auth_data.access_token}"
-            }
-            
-            # Use the API client's session to ensure cookies are shared
-            api_session = self._api_client._session
-        
-            
-            # Step 1: Create the recipe with just the name
+            base_url = f"{url_parts[0]}//{url_parts[2]}"
+            locale = localization.language
+
             create_url = f"{base_url}/created-recipes/{locale}"
-            create_data = {"recipeName": name}
-            
-            async with api_session.post(
-                create_url, json=create_data, headers=headers
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(
-                        f"Failed to create recipe. Status: {response.status}, Error: {error_text}"
-                    )
-                
-                result = await response.json()
-                recipe_id = result.get("recipeId")
-                
-                if not recipe_id:
-                    raise Exception("No recipe ID returned from creation")
-            
-            # Step 2: Update recipe with ingredients
+            status, text = await self._authed_request(
+                "POST", create_url, json_body={"recipeName": name}
+            )
+            if status != 200:
+                raise Exception(
+                    f"Failed to create recipe. Status: {status}, Error: {text}"
+                )
+            result = json.loads(text)
+            recipe_id = result.get("recipeId")
+            if not recipe_id:
+                raise Exception("No recipe ID returned from creation")
+
             update_url = f"{base_url}/created-recipes/{locale}/{recipe_id}"
-            
-            # PATCH requires a complete recipe structure with ALL required fields
             update_data = {
                 "name": name,
-                "image": None,  # Can be null or match pattern: ^((prod|nonprod)/img/customer-recipe/)?[A-Za-z0-9-_]{1,}.(bmp|jpe|jpeg|jpg|png)$
+                "image": None,
                 "isImageOwnedByUser": False,
                 "tools": tools if tools else ["TM7", "TM6", "TM5"],
                 "yield": {"value": servings, "unitText": "portion"},
-                "prepTime": prep_time * 60,  # Convert minutes to seconds
+                "prepTime": prep_time * 60,
                 "cookTime": 0,
-                "totalTime": total_time * 60,  # Convert minutes to seconds
+                "totalTime": total_time * 60,
                 "ingredients": [{"type": "INGREDIENT", "text": ing} for ing in ingredients],
                 "instructions": [
                     build_instruction(normalize_action_step(step), ingredients)
@@ -425,20 +436,19 @@ class CookidooService:
                 ],
                 "hints": "\n".join(hints) if hints and isinstance(hints, list) else (hints if hints else ""),
                 "workStatus": "PRIVATE",
-                "recipeMetadata": {
-                    "requiresAnnotationsCheck": False
-                }
+                "recipeMetadata": {"requiresAnnotationsCheck": False},
             }
-            
+
             await asyncio.sleep(5)
 
             try:
-                async with api_session.patch(update_url, json=update_data, headers=headers) as response:
-                    response_text = await response.text()
-                    if response.status not in [200, 204]:
-                        raise Exception(
-                            f"Failed to update recipe. Status: {response.status}, Error: {response_text}"
-                        )
+                status, text = await self._authed_request(
+                    "PATCH", update_url, json_body=update_data
+                )
+                if status not in (200, 204):
+                    raise Exception(
+                        f"Failed to update recipe. Status: {status}, Error: {text}"
+                    )
             except Exception:
                 # Rollback: the POST created an empty recipe; delete it so no zombie remains.
                 try:
@@ -453,10 +463,15 @@ class CookidooService:
             raise Exception(f"Failed to create custom recipe: {str(e)}") from e
 
     async def delete_custom_recipe(self, recipe_id: str) -> None:
-        """Delete one of the user's custom recipes by ID."""
+        """Delete one of the user's custom recipes by ID. Refreshes the access
+        token once if the library reports an auth failure (expired token)."""
         if not self._api_client:
             raise Exception("Not authenticated. Please call login() first.")
-        await self._api_client.remove_custom_recipe(recipe_id)
+        try:
+            await self._api_client.remove_custom_recipe(recipe_id)
+        except CookidooAuthException:
+            await self._api_client.refresh_token()
+            await self._api_client.remove_custom_recipe(recipe_id)
 
     async def list_custom_recipes(self) -> list[dict]:
         """List the user's custom recipes. Returns a list of {recipe_id, name, created_at, total_time}."""
@@ -466,14 +481,12 @@ class CookidooService:
         url_parts = localization.url.split("/")
         base_url = f"{url_parts[0]}//{url_parts[2]}"
         url = f"{base_url}/created-recipes/{localization.language}"
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self._api_client.auth_data.access_token}",
-        }
-        async with self._api_client._session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise Exception(f"Failed to list recipes. Status: {response.status}")
-            data = await response.json()
+
+        status, text = await self._authed_request("GET", url)
+        if status != 200:
+            raise Exception(f"Failed to list recipes. Status: {status}")
+        data = json.loads(text)
+
         items = []
         for item in data.get("items", []):
             content = item.get("recipeContent", {})
