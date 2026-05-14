@@ -71,15 +71,14 @@ Let Claude read recipes from your Cookidoo account and create new TM7-optimized 
 
 ## Quality Scoring
 
-Score out of 100. Default upload threshold is 70, configurable via `COOKIDOO_QUALITY_BAR`.
+Score out of 100. Default upload threshold is 70, configurable via `COOKIDOO_QUALITY_BAR`. The score is dominated by how many steps are parseable as TM7 *guided-cooking* actions — only those render with a Play-Button on the device.
 
-| Criterion | Points | Coverage required |
-|-----------|--------|-------------------|
-| Time indication on steps | 30 | ≥80% of action steps |
-| Temperature on cooking steps | 25 | ≥60% |
-| Speed/mode setting | 20 | ≥70% |
-| Accessory mentions (Schmetterling, Varoma, Spatel, …) | 10 | any |
-| TM7 parallelization (Varoma-Aufsatz, Gareinsatz, …) | 15 | any |
+| Criterion | Points | Notes |
+|-----------|--------|-------|
+| TTS/MODE-parseable action steps (Play-Button) | 50 | Roughly half of steps should be pure actions like `5 Sek./Stufe 5` or `15 Min./Varoma/Stufe 2`. Scales linearly with coverage. |
+| Ingredient annotations resolved in step text | 20 | At least one step should reference an ingredient using the exact substring from the ingredient list, so the backend can link them. |
+| Accessory mentions (Schmetterling, Varoma, Spatel, Gareinsatz, …) | 10 | Helps the cook know what to attach. |
+| TM7 parallelization (Varoma above, Gareinsatz inside, "gleichzeitig"/"während") | 20 | Encourages using the TM7's two cooking zones at once. |
 
 The validator also produces contextual suggestions, e.g. Schmetterling for cream/egg whites, Teigknetstufe for dough.
 
