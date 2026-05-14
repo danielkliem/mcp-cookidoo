@@ -119,6 +119,10 @@ For production deployment behind a reverse proxy (Caddy/nginx/Traefik), terminat
 - **Zombie empty recipes in your account.** Should not happen, since rollback runs automatically if the PATCH step fails. Delete leftovers with `delete_custom_recipe` or `list_my_custom_recipes`.
 - **Step renders with "mark as done" checkbox instead of Play-Button.** The verb prefix wasn't stripped. Ensure the step text starts with a quantity (e.g. `30 Sek./Stufe 5`), not a verb (`Mahlen 30 Sek./Stufe 5`).
 
+## Known Limitations
+
+- **Shopping list ingredients land under "Sonstige" (Misc).** When a custom recipe is added to the Cookidoo shopping list, every ingredient is categorized as `ShoppingCategory-rpf-10` (Sonstige), regardless of what it is. This is a Cookidoo backend behaviour, not an MCP limitation: the public custom-recipe API accepts ingredients only as free-text strings, the Cookidoo web editor itself has no per-ingredient category picker or canonical-ingredient autocomplete, and the backend hardcodes the `rpf-10` reference for every customer-recipe ingredient. Categorization on the shopping list works for native Cookidoo recipes because those carry a canonical `ingredient_ref` that maps to a category server-side. There is currently no known workaround.
+
 ## Development
 
 ```bash
