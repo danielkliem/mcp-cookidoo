@@ -12,7 +12,6 @@ import re
 from typing import Optional
 
 from fastmcp import FastMCP
-from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
