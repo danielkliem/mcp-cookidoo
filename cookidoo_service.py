@@ -301,8 +301,11 @@ class CookidooService:
             Exception: If authentication fails
         """
         try:
-            # Create aiohttp ClientSession with a timeout
-            self._session = ClientSession(connector=aiohttp.TCPConnector(verify_ssl=False))
+            # TLS verification on by default; COOKIDOO_INSECURE_SSL=1 disables it
+            # for debugging behind intercepting proxies.
+            insecure = os.getenv("COOKIDOO_INSECURE_SSL", "").lower() in ("1", "true", "yes")
+            connector = aiohttp.TCPConnector(ssl=False) if insecure else aiohttp.TCPConnector()
+            self._session = ClientSession(connector=connector)
             
 
             # Create CookidooConfig with credentials
@@ -439,6 +442,8 @@ class CookidooService:
                 "recipeMetadata": {"requiresAnnotationsCheck": False},
             }
 
+            # Give the backend time to materialize the recipe created by the POST
+            # above — PATCHing immediately after creation is unreliable.
             await asyncio.sleep(5)
 
             try:

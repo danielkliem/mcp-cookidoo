@@ -51,7 +51,7 @@ Let Claude read recipes from your Cookidoo account and create new TM7-optimized 
   These render as proper guided steps with a Play-Button on the TM7 device. Verb prefixes like *Mahlen*, *Zerkleinern*, *Anbraten* are auto-stripped, since pure-action steps render as guided steps while verb-prefixed prose renders as "mark as done" checkboxes.
 - **Quality gate.** Recipes are scored 0–100 on Thermomix vocabulary coverage before upload. Below the configured bar, upload is refused unless `force_upload=true`.
 - **Automatic rollback.** If the upload PATCH fails (e.g. schema validation error), the partial recipe is deleted so no zombies accumulate in your account.
-- **Multilingual prompts.** Built-in workflow prompts in German (`prompt.md`) and French (`prompt_FR.md`).
+- **Guided workflow prompt.** The MCP prompt `create_tm7_recipe(dish)` carries the full reverse-engineered step grammar — supported action formats, allowed discrete temperature values, and the structuring rules — so the model learns the constraints before writing a single step.
 
 ## MCP Tools
 
@@ -82,6 +82,20 @@ Score out of 100. Default upload threshold is 70, configurable via `COOKIDOO_QUA
 
 The validator also produces contextual suggestions, e.g. Schmetterling for cream/egg whites, Teigknetstufe for dough.
 
+The stylistic criteria together max out at 50 points, so the default bar of 70 cannot be met without a substantial share of parseable guided actions — the one criterion that is functional rather than cosmetic.
+
+## Design Decisions
+
+**Auth is a precondition, not a step.** Every tool calls `_ensure_connected()` itself instead of requiring the model to call `connect_to_cookidoo` first. A model planning a multi-tool workflow will skip a setup step it does not consider load-bearing, and the resulting auth error is an unhelpful place to fail. The explicit tool remains for credential debugging. The cost is a module-level session singleton — correct for a single-account server, and the reason this is not multi-tenant.
+
+**The quality gate blocks rather than warns.** An upload is side-effectful and lands in a real account, and the score measures function, not taste: a low score means the recipe will render without play buttons, which is the entire point of the project. A warning in a tool result is advisory text the model may reason past, so the refusal is enforced in code, with `force_upload=true` as the explicit user-accepted override.
+
+**Failed uploads roll back instead of retrying.** Creation is two calls: a POST that creates a named empty recipe and a PATCH that fills it. PATCH failures are almost always schema rejections — an out-of-enum temperature, a malformed annotation — which are deterministic, so a retry would send the same rejected payload again. Instead the orphaned recipe is deleted and the original error surfaced. The rollback is best-effort and deliberately swallows its own exceptions: a failing cleanup must not mask the error that caused it.
+
+**Ingredient matching is exact-substring, longest-first.** Fuzzy matching would link "Reis" to "200 g Langkornreis" and produce annotations whose character offsets do not match what the user sees. Instead the matcher requires the step text to repeat the ingredient entry verbatim, resolves longer entries first, and skips spans that overlap an already-claimed region, so an ingredient inside an action span is not double-annotated. The strictness is pushed onto the model, which the MCP prompt states as a hard rule.
+
+**Both transports, one tool implementation.** stdio serves local Claude Desktop; stateless HTTP with a bearer token serves remote connectors, which hold no session between requests. A single environment variable selects the mode, and the tool functions are unaware of either.
+
 ## Configuration
 
 All settings via environment variables (or `.env` file):
@@ -94,6 +108,7 @@ All settings via environment variables (or `.env` file):
 | `COOKIDOO_MCP_PORT` | `8001` | Local bind port (HTTP mode only) |
 | `COOKIDOO_API_TOKEN` | empty | Bearer token required on `/mcp`. Empty = no middleware auth. |
 | `COOKIDOO_QUALITY_BAR` | `70` | Minimum quality score required by `upload_custom_recipe` |
+| `COOKIDOO_INSECURE_SSL` | off | Set to `1` to disable TLS verification (debugging behind intercepting proxies only) |
 
 ## HTTP Transport
 
@@ -120,6 +135,10 @@ For production deployment behind a reverse proxy (Caddy/nginx/Traefik), terminat
 
 ## Known Limitations
 
+- **Single account.** The authenticated session is a module-level singleton, so one running instance serves exactly one Cookidoo account.
+- **Undocumented API.** The created-recipes endpoint and its annotation schema were reverse-engineered from the web app and can change without warning.
+- **German vocabulary first.** The parser accepts some English and French tokens, but the scorer's heuristics and the MCP prompt are written for `de-CH`.
+- **Not all TM7 modes are covered.** Gären/Fermentieren, Rice Cooker, Turbo and Teigknetstufe have no annotation support yet; the prompt instructs the model to write them as prose so the user sets them manually on the device.
 - **Shopping list ingredients land under "Sonstige" (Misc).** When a custom recipe is added to the Cookidoo shopping list, every ingredient is categorized as `ShoppingCategory-rpf-10` (Sonstige), regardless of what it is. This is a Cookidoo backend behaviour, not an MCP limitation: the public custom-recipe API accepts ingredients only as free-text strings, the Cookidoo web editor itself has no per-ingredient category picker or canonical-ingredient autocomplete, and the backend hardcodes the `rpf-10` reference for every customer-recipe ingredient. Categorization on the shopping list works for native Cookidoo recipes because those carry a canonical `ingredient_ref` that maps to a category server-side. There is currently no known workaround.
 
 ## Development
